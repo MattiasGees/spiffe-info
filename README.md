@@ -4,6 +4,8 @@ A debug and inspection tool for [SPIFFE](https://spiffe.io/) workload identity. 
 
 Built to make SPIFFE identity visible without writing custom tooling.
 
+![spiffe-info web UI](docs/screenshot.png)
+
 ## Usage
 
 ### Kubernetes
