@@ -1,0 +1,65 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spiffe-info
+  labels:
+    app: spiffe-info
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spiffe-info
+  template:
+    metadata:
+      labels:
+        app: spiffe-info
+    spec:
+      containers:
+        - name: spiffe-info
+          image: ghcr.io/mattiasgees/spiffe-info:latest
+          ports:
+            - name: http
+              containerPort: 80
+          env:
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "unix:///run/spire/sockets/agent.sock"
+            - name: PORT
+              value: "80"
+            - name: JWT_AUDIENCE
+              value: "spiffe-info"
+          volumeMounts:
+            - name: spire-agent-socket
+              mountPath: /run/spire/sockets
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: spire-agent-socket
+          hostPath:
+            path: /run/spire/sockets
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spiffe-info
+  labels:
+    app: spiffe-info
+spec:
+  selector:
+    app: spiffe-info
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
