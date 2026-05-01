@@ -1,4 +1,9 @@
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spiffe-info
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -15,6 +20,7 @@ spec:
       labels:
         app: spiffe-info
     spec:
+      serviceAccountName: spiffe-info
       containers:
         - name: spiffe-info
           image: ghcr.io/mattiasgees/spiffe-info:latest
@@ -23,14 +29,14 @@ spec:
               containerPort: 80
           env:
             - name: SPIFFE_ENDPOINT_SOCKET
-              value: "unix:///run/spire/sockets/agent.sock"
+              value: "unix:///tmp/swa-agent/public/api.sock"
             - name: PORT
               value: "80"
             - name: JWT_AUDIENCE
               value: "spiffe-info"
           volumeMounts:
-            - name: spire-agent-socket
-              mountPath: /run/spire/sockets
+            - name: swa-agent-socket
+              mountPath: /tmp/swa-agent
               readOnly: true
           resources:
             requests:
@@ -45,10 +51,10 @@ spec:
             capabilities:
               drop: [ALL]
       volumes:
-        - name: spire-agent-socket
+        - name: swa-agent-socket
           hostPath:
-            path: /run/spire/sockets
-            type: DirectoryOrCreate
+            path: /tmp/swa-agent
+            type: Directory
 ---
 apiVersion: v1
 kind: Service
