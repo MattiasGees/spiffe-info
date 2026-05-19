@@ -22,10 +22,12 @@ type Store interface {
 // Watcher subscribes to X.509 context updates from the Workload API,
 // caches the latest context, and invokes onUpdate on each rotation.
 type Watcher struct {
-	client   *workloadapi.Client
-	mu       sync.RWMutex
-	current  *workloadapi.X509Context
-	onUpdate func(*workloadapi.X509Context)
+	client         *workloadapi.Client
+	mu             sync.RWMutex
+	current        *workloadapi.X509Context
+	connected      bool
+	everConnected  bool
+	onUpdate       func(*workloadapi.X509Context)
 }
 
 func NewWatcher(client *workloadapi.Client, onUpdate func(*workloadapi.X509Context)) *Watcher {
@@ -43,8 +45,19 @@ func (w *Watcher) Watch(ctx context.Context) error {
 
 func (w *Watcher) OnX509ContextUpdate(ctx *workloadapi.X509Context) {
 	w.mu.Lock()
+	wasConnected := w.connected
+	everConnected := w.everConnected
 	w.current = ctx
+	w.connected = true
+	w.everConnected = true
 	w.mu.Unlock()
+	if !wasConnected {
+		if !everConnected {
+			fmt.Fprintf(os.Stdout, "connected to workload API\n")
+		} else {
+			fmt.Fprintf(os.Stdout, "reconnected to workload API\n")
+		}
+	}
 	if w.onUpdate != nil {
 		w.onUpdate(ctx)
 	}
@@ -54,7 +67,15 @@ func (w *Watcher) OnX509ContextWatchError(err error) {
 	if status.Code(err) == codes.Canceled {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "workload API watcher error: %v\n", err)
+	w.mu.Lock()
+	wasConnected := w.connected
+	w.connected = false
+	w.mu.Unlock()
+	if wasConnected {
+		fmt.Fprintf(os.Stderr, "disconnected from workload API: %v\n", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "workload API watcher error: %v\n", err)
+	}
 }
 
 func (w *Watcher) CurrentX509Context() *workloadapi.X509Context {

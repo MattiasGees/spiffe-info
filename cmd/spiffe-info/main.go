@@ -27,9 +27,9 @@ func main() {
 	defer cancel()
 
 	fmt.Printf("spiffe-info starting\n")
-	fmt.Printf("  workload API : %s\n", cfg.WorkloadAPIAddr)
-	fmt.Printf("  HTTP port    : %d\n", cfg.Port)
-	fmt.Printf("  JWT audience : %s\n", cfg.JWTAudience)
+	fmt.Printf("  workload API socket : %s\n", cfg.WorkloadAPIAddr)
+	fmt.Printf("  HTTP port           : %d\n", cfg.Port)
+	fmt.Printf("  JWT audience        : %s\n", cfg.JWTAudience)
 	fmt.Println()
 
 	client, err := workloadapi.New(ctx, workloadapi.WithAddr(cfg.WorkloadAPIAddr))
