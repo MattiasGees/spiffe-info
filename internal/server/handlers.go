@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mattiasGees/spiffe-info/internal/chain"
 	"github.com/mattiasGees/spiffe-info/internal/workload"
 )
 
@@ -43,6 +44,31 @@ type x509SVIDResponse struct {
 	Fingerprint        string   `json:"fingerprint"`
 	PEM                string   `json:"pem"`
 	PublicKeyPEM       string   `json:"publicKeyPem"`
+	// Chain is leaf first and ends at the trust bundle root when one anchors it.
+	Chain         []chainCert `json:"chain"`
+	ChainVerified bool        `json:"chainVerified"`
+	ChainError    string      `json:"chainError,omitempty"`
+	// ChainPEM is every certificate the Workload API sent with the SVID, leaf
+	// first. It excludes the bundle root, as a TLS peer would send it.
+	ChainPEM string `json:"chainPem"`
+}
+
+type chainCert struct {
+	Role               string `json:"role"`
+	FromBundle         bool   `json:"fromBundle"`
+	Subject            string `json:"subject"`
+	Issuer             string `json:"issuer"`
+	SerialNumber       string `json:"serialNumber"`
+	NotBefore          string `json:"notBefore"`
+	NotAfter           string `json:"notAfter"`
+	KeyAlgorithm       string `json:"keyAlgorithm"`
+	SignatureAlgorithm string `json:"signatureAlgorithm"`
+	IsCA               bool   `json:"isCA"`
+	MaxPathLen         *int   `json:"maxPathLen,omitempty"`
+	SubjectKeyID       string `json:"subjectKeyId"`
+	AuthorityKeyID     string `json:"authorityKeyId"`
+	Fingerprint        string `json:"fingerprint"`
+	PEM                string `json:"pem"`
 }
 
 type jwtSVIDResponse struct {
@@ -67,7 +93,10 @@ type trustBundleCert struct {
 	SignatureAlgorithm string `json:"signatureAlgorithm"`
 	Fingerprint        string `json:"fingerprint"`
 	IsCA               bool   `json:"isCA"`
-	PEM                string `json:"pem"`
+	SubjectKeyID       string `json:"subjectKeyId"`
+	// AnchorsSVID is true for the authority the current X.509-SVID chains to.
+	AnchorsSVID bool   `json:"anchorsSvid"`
+	PEM         string `json:"pem"`
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
@@ -86,6 +115,7 @@ func (h *handlers) handleX509SVID(w http.ResponseWriter, r *http.Request) {
 	cert := svid.Certificates[0]
 
 	pubKeyPEM, _ := marshalPublicKey(svid.PrivateKey.Public())
+	res := chain.Resolve(svid, ctx.Bundles)
 
 	resp := x509SVIDResponse{
 		SpiffeID:           svid.ID.String(),
@@ -104,6 +134,12 @@ func (h *handlers) handleX509SVID(w http.ResponseWriter, r *http.Request) {
 		Fingerprint:        certFingerprint(cert),
 		PEM:                certToPEM(cert),
 		PublicKeyPEM:       pubKeyPEM,
+		Chain:              chainCerts(res),
+		ChainVerified:      res.Verified,
+		ChainPEM:           certsToPEM(svid.Certificates),
+	}
+	if res.Err != nil {
+		resp.ChainError = res.Err.Error()
 	}
 	writeJSON(w, resp)
 }
@@ -140,6 +176,11 @@ func (h *handlers) handleTrustBundles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var res chain.Result
+	if len(ctx.SVIDs) > 0 {
+		res = chain.Resolve(ctx.SVIDs[0], ctx.Bundles)
+	}
+
 	var result []trustBundleCert
 	for _, bundle := range ctx.Bundles.Bundles() {
 		td := bundle.TrustDomain().String()
@@ -156,6 +197,8 @@ func (h *handlers) handleTrustBundles(w http.ResponseWriter, r *http.Request) {
 				SignatureAlgorithm: sigAlgorithmName(cert),
 				Fingerprint:        certFingerprint(cert),
 				IsCA:               cert.IsCA,
+				SubjectKeyID:       chain.FormatKeyID(cert.SubjectKeyId),
+				AnchorsSVID:        res.AnchorsOf(cert),
 				PEM:                certToPEM(cert),
 			})
 		}
@@ -199,6 +242,43 @@ func certToPEM(cert *x509.Certificate) string {
 	var buf bytes.Buffer
 	pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
 	return buf.String()
+}
+
+func certsToPEM(certs []*x509.Certificate) string {
+	var sb strings.Builder
+	for _, c := range certs {
+		sb.WriteString(certToPEM(c))
+	}
+	return sb.String()
+}
+
+func chainCerts(res chain.Result) []chainCert {
+	out := make([]chainCert, 0, len(res.Links))
+	for _, l := range res.Links {
+		c := l.Cert
+		cc := chainCert{
+			Role:               string(l.Role),
+			FromBundle:         l.FromBundle,
+			Subject:            c.Subject.String(),
+			Issuer:             c.Issuer.String(),
+			SerialNumber:       formatSerial(c.SerialNumber),
+			NotBefore:          c.NotBefore.UTC().Format(time.RFC3339),
+			NotAfter:           c.NotAfter.UTC().Format(time.RFC3339),
+			KeyAlgorithm:       keyAlgorithmName(c),
+			SignatureAlgorithm: sigAlgorithmName(c),
+			IsCA:               c.IsCA,
+			SubjectKeyID:       chain.FormatKeyID(c.SubjectKeyId),
+			AuthorityKeyID:     chain.FormatKeyID(c.AuthorityKeyId),
+			Fingerprint:        certFingerprint(c),
+			PEM:                certToPEM(c),
+		}
+		if c.IsCA && (c.MaxPathLen > 0 || c.MaxPathLenZero) {
+			n := c.MaxPathLen
+			cc.MaxPathLen = &n
+		}
+		out = append(out, cc)
+	}
+	return out
 }
 
 func marshalPublicKey(pub crypto.PublicKey) (string, error) {

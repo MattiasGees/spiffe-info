@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mattiasGees/spiffe-info/internal/chain"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
 )
 
@@ -25,6 +26,44 @@ func PrintX509Context(w io.Writer, ctx *workloadapi.X509Context) {
 		return
 	}
 	printSVID(w, svid.ID.String(), svid.Hint, svid.Certificates[0], svid.PrivateKey)
+	printChain(w, chain.Resolve(svid, ctx.Bundles))
+}
+
+// printChain draws the chain leaf first, one entry per certificate, then the
+// verification result.
+func printChain(w io.Writer, res chain.Result) {
+	fmt.Fprintln(w, " Trust Chain")
+	for i, l := range res.Links {
+		branch, cont := "├─", "│ "
+		if i == len(res.Links)-1 {
+			branch, cont = "└─", "  "
+		}
+		name := l.Cert.Subject.String()
+		if name == "" {
+			name = "(empty subject)"
+		}
+		source := ""
+		if l.FromBundle {
+			source = "  [trust bundle]"
+		}
+		fmt.Fprintf(w, "  %s %-12s %s%s\n", branch, l.Role, name, source)
+		fmt.Fprintf(w, "  %s              %s · expires %s (%s)\n", cont,
+			keyAlgorithmName(l.Cert),
+			l.Cert.NotAfter.UTC().Format("2006-01-02 15:04 UTC"),
+			formatRemaining(l.Cert.NotAfter))
+		if ski := chain.FormatKeyID(l.Cert.SubjectKeyId); ski != "" {
+			fmt.Fprintf(w, "  %s              SKI %s\n", cont, ski)
+		}
+		if aki := chain.FormatKeyID(l.Cert.AuthorityKeyId); aki != "" && !l.FromBundle {
+			fmt.Fprintf(w, "  %s              AKI %s\n", cont, aki)
+		}
+	}
+	if res.Verified {
+		fmt.Fprintln(w, "  ✓ Verified against the trust bundle")
+	} else {
+		fmt.Fprintf(w, "  ✗ Not verified: %v\n", res.Err)
+	}
+	fmt.Fprintln(w, divider)
 }
 
 func printSVID(w io.Writer, spiffeID, hint string, cert *x509.Certificate, key crypto.Signer) {

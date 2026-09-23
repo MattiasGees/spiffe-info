@@ -11,14 +11,20 @@ import (
 	"time"
 )
 
-// CA is a self-signed ECDSA certificate authority used to issue SVID leaf certs.
+// CA is a self-signed ECDSA root plus an intermediate it signs. Leaf SVIDs are
+// issued by the intermediate, so clients see a leaf, intermediate, root chain
+// like a real SPIFFE deployment produces.
 type CA struct {
-	Cert    *x509.Certificate
+	Cert    *x509.Certificate // root, published as the trust bundle
 	CertDER []byte
 	Key     *ecdsa.PrivateKey
+
+	IntermediateCert *x509.Certificate // signs leaf SVIDs, sent with each SVID
+	IntermediateDER  []byte
+	IntermediateKey  *ecdsa.PrivateKey
 }
 
-// NewCA generates a new self-signed CA valid for ttl.
+// NewCA generates a new self-signed root and an intermediate, both valid for ttl.
 func NewCA(ttl time.Duration) (*CA, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -51,12 +57,50 @@ func NewCA(ttl time.Duration) (*CA, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &CA{Cert: cert, CertDER: der, Key: key}, nil
+	ca := &CA{Cert: cert, CertDER: der, Key: key}
+	if err := ca.newIntermediate(ttl); err != nil {
+		return nil, err
+	}
+	return ca, nil
+}
+
+func (ca *CA) newIntermediate(ttl time.Duration) error {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return err
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return err
+	}
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			CommonName:   "Mock SPIFFE Intermediate CA",
+			Organization: []string{"spiffe-info Mock"},
+		},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().Add(ttl),
+		IsCA:                  true,
+		MaxPathLenZero:        true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, ca.Cert, &key.PublicKey, ca.Key)
+	if err != nil {
+		return err
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		return err
+	}
+	ca.IntermediateCert, ca.IntermediateDER, ca.IntermediateKey = cert, der, key
+	return nil
 }
 
 // IssuedSVID holds the DER-encoded artifacts for one leaf SVID.
 type IssuedSVID struct {
-	CertDER   []byte // ASN.1 DER leaf certificate
+	CertDER   []byte // ASN.1 DER leaf certificate followed by the intermediate
 	KeyDER    []byte // PKCS#8 ASN.1 DER private key
 	BundleDER []byte // ASN.1 DER CA certificate (trust bundle)
 }
@@ -88,7 +132,7 @@ func (ca *CA) Issue(spiffeID string, ttl time.Duration) (*IssuedSVID, error) {
 		URIs:         []*url.URL{uri},
 	}
 
-	certDER, err := x509.CreateCertificate(rand.Reader, template, ca.Cert, &leafKey.PublicKey, ca.Key)
+	certDER, err := x509.CreateCertificate(rand.Reader, template, ca.IntermediateCert, &leafKey.PublicKey, ca.IntermediateKey)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +143,7 @@ func (ca *CA) Issue(spiffeID string, ttl time.Duration) (*IssuedSVID, error) {
 	}
 
 	return &IssuedSVID{
-		CertDER:   certDER,
+		CertDER:   append(certDER, ca.IntermediateDER...),
 		KeyDER:    keyDER,
 		BundleDER: ca.CertDER,
 	}, nil
