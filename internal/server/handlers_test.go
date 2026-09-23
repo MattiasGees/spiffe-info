@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -158,5 +159,103 @@ func TestHandleJWTSVID_Error(t *testing.T) {
 	h.handleJWTSVID(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d", rec.Code)
+	}
+}
+
+// buildChainedX509Context returns a context whose SVID is leaf + intermediate,
+// with the signing root and an unrelated root in the bundle.
+func buildChainedX509Context(t *testing.T) *workloadapi.X509Context {
+	t.Helper()
+	newCert := func(tmpl, parent *x509.Certificate, parentKey *ecdsa.PrivateKey) (*x509.Certificate, *ecdsa.PrivateKey) {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if parent == nil {
+			parent, parentKey = tmpl, key
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, &key.PublicKey, parentKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, _ := x509.ParseCertificate(der)
+		return c, key
+	}
+	caTmpl := func(cn string) *x509.Certificate {
+		return &x509.Certificate{
+			SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: cn},
+			NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(24 * time.Hour),
+			IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+		}
+	}
+	root, rootKey := newCert(caTmpl("root"), nil, nil)
+	stale, _ := newCert(caTmpl("stale root"), nil, nil)
+	inter, interKey := newCert(caTmpl("intermediate"), root, rootKey)
+	uri, _ := url.Parse("spiffe://example.org/workload/test")
+	leaf, leafKey := newCert(&x509.Certificate{
+		SerialNumber: big.NewInt(2), NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour),
+		URIs: []*url.URL{uri}, KeyUsage: x509.KeyUsageDigitalSignature,
+	}, inter, interKey)
+
+	id := spiffeid.RequireFromString("spiffe://example.org/workload/test")
+	bundle := x509bundle.New(id.TrustDomain())
+	bundle.AddX509Authority(stale)
+	bundle.AddX509Authority(root)
+	return &workloadapi.X509Context{
+		SVIDs:   []*x509svid.SVID{{ID: id, Certificates: []*x509.Certificate{leaf, inter}, PrivateKey: leafKey}},
+		Bundles: x509bundle.NewSet(bundle),
+	}
+}
+
+func TestHandleX509SVID_Chain(t *testing.T) {
+	h := &handlers{store: &mockStore{x509ctx: buildChainedX509Context(t)}, jwtAudience: "spiffe-info"}
+	rec := httptest.NewRecorder()
+	h.handleX509SVID(rec, httptest.NewRequest(http.MethodGet, "/api/x509-svid", nil))
+
+	var resp x509SVIDResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.ChainVerified || resp.ChainError != "" {
+		t.Fatalf("expected verified chain, got error %q", resp.ChainError)
+	}
+	if len(resp.Chain) != 3 {
+		t.Fatalf("expected 3 chain certs, got %d", len(resp.Chain))
+	}
+	want := []string{"leaf", "intermediate", "root"}
+	for i, c := range resp.Chain {
+		if c.Role != want[i] {
+			t.Errorf("chain[%d].role = %q, want %q", i, c.Role, want[i])
+		}
+	}
+	if resp.Chain[1].SubjectKeyID == "" || resp.Chain[0].AuthorityKeyID != resp.Chain[1].SubjectKeyID {
+		t.Error("leaf AKI should equal the intermediate SKI")
+	}
+	if !resp.Chain[2].FromBundle || resp.Chain[2].Subject != "CN=root" {
+		t.Errorf("unexpected root: %+v", resp.Chain[2])
+	}
+	if n := strings.Count(resp.ChainPEM, "BEGIN CERTIFICATE"); n != 2 {
+		t.Errorf("chainPem should hold leaf and intermediate, got %d certs", n)
+	}
+}
+
+func TestHandleTrustBundles_AnchorsSVID(t *testing.T) {
+	h := &handlers{store: &mockStore{x509ctx: buildChainedX509Context(t)}, jwtAudience: "spiffe-info"}
+	rec := httptest.NewRecorder()
+	h.handleTrustBundles(rec, httptest.NewRequest(http.MethodGet, "/api/trust-bundles", nil))
+
+	var bundles []trustBundleCert
+	if err := json.NewDecoder(rec.Body).Decode(&bundles); err != nil {
+		t.Fatal(err)
+	}
+	anchors := map[string]bool{}
+	for _, b := range bundles {
+		anchors[b.Subject] = b.AnchorsSVID
+		if b.SubjectKeyID == "" {
+			t.Errorf("%s: missing subjectKeyId", b.Subject)
+		}
+	}
+	if !anchors["CN=root"] || anchors["CN=stale root"] {
+		t.Errorf("anchorsSvid = %v, want only CN=root", anchors)
 	}
 }

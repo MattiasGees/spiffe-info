@@ -7,11 +7,14 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"math/big"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mattiasGees/spiffe-info/internal/chain"
 )
 
 func generateTestCert(t *testing.T, spiffeID string, notAfter time.Time) (*x509.Certificate, *ecdsa.PrivateKey) {
@@ -109,5 +112,38 @@ func TestFormatRemaining(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("formatRemaining(%v) = %q, want %q", tc.dur, got, tc.want)
 		}
+	}
+}
+
+func TestPrintChain(t *testing.T) {
+	leaf, _ := generateTestCert(t, "spiffe://example.org/workload/test", time.Now().Add(time.Hour))
+	root, _ := generateTestCert(t, "spiffe://example.org/root", time.Now().Add(24*time.Hour))
+	root.SubjectKeyId = []byte{0xAB, 0xCD}
+
+	var buf bytes.Buffer
+	printChain(&buf, chain.Result{
+		Links: []chain.Link{
+			{Cert: leaf, Role: chain.RoleLeaf},
+			{Cert: root, Role: chain.RoleRoot, FromBundle: true},
+		},
+		Verified: true,
+	})
+	out := buf.String()
+	for _, want := range []string{"Trust Chain", "├─ leaf", "└─ root", "[trust bundle]", "SKI AB:CD", "✓ Verified"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\nfull output:\n%s", want, out)
+		}
+	}
+}
+
+func TestPrintChain_NotVerified(t *testing.T) {
+	leaf, _ := generateTestCert(t, "spiffe://example.org/workload/test", time.Now().Add(time.Hour))
+	var buf bytes.Buffer
+	printChain(&buf, chain.Result{
+		Links: []chain.Link{{Cert: leaf, Role: chain.RoleLeaf}},
+		Err:   errors.New("x509svid: could not verify leaf certificate"),
+	})
+	if !strings.Contains(buf.String(), "✗ Not verified: x509svid: could not verify leaf certificate") {
+		t.Errorf("unexpected output:\n%s", buf.String())
 	}
 }

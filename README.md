@@ -50,8 +50,10 @@ All options accept both a flag and an environment variable. Flags take precedenc
 Three tabs, all data fetched live from the Workload API:
 
 - **JWT-SVID** — raw token with colour-coded header/payload/signature, claims, validity bar
-- **X.509-SVID** — certificate details, algorithms, SANs, fingerprint, PEM download
-- **Trust Bundles** — all CA certificates grouped by trust domain; view details, download PEM
+- **X.509-SVID** — certificate details, algorithms, SANs, fingerprint, PEM download, and the trust chain: leaf, intermediates and the trust bundle root that anchors them, each with its Subject and Authority Key IDs, verified against the trust bundle. Copy or download the whole chain as PEM.
+- **Trust Bundles** — all CA certificates grouped by trust domain; view details, download PEM. The root the current X.509-SVID chains to is marked **Anchors SVID**, so stale roots stand out.
+
+Each X.509-SVID rotation printed to stdout ends with the same chain as a tree, and whether it verified.
 
 ## Development
 
